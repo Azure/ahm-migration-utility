@@ -38,6 +38,7 @@ public class EntityProperties : IResourceProperties
 {
     public string? DisplayName { get; set; }
     public string Impact { get; set; } = "Standard";
+    public double? HealthObjective { get; set; }
     public CanvasPosition? CanvasPosition { get; set; }
 
     public SignalGroups? SignalGroups { get; set; }
@@ -53,10 +54,22 @@ public class EntityProperties : IResourceProperties
                       }
                 """;
 
+        var healthObjectiveString = "";
+        if (HealthObjective != null)
+        {
+            var ho = HealthObjective.Value;
+            // Bicep has no floating-point literals: emit whole numbers as integers and
+            // fractional values via json('...') (ARM evaluates it to the numeric value).
+            var hoLiteral = ho == Math.Floor(ho) && !double.IsInfinity(ho)
+                ? ((long)ho).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : $"json('{ho.ToString(System.Globalization.CultureInfo.InvariantCulture)}')";
+            healthObjectiveString = $"\n      healthObjective: {hoLiteral}";
+        }
+
         var template = $$"""
                          {
                                displayName: '{{DisplayName}}'
-                               impact: '{{Impact}}'
+                               impact: '{{Impact}}'{{healthObjectiveString}}
                                canvasPosition: {{canvasPositionString}}
                                signalGroups: {{(SignalGroups == null ? "null" : SignalGroups.ToBicepString())}}
                            }
@@ -245,7 +258,7 @@ public class AzureResourceSignalInstance
                                       timeGrain: '{{TimeGrain}}'
                                       refreshInterval: '{{RefreshInterval}}'
                                       aggregationType: '{{AggregationType}}'
-                                      dimensionFilter: {{(DimensionFilter == null ? "null" : "'" + DimensionFilter + "'")}}
+                                      dimensionFilter: {{(DimensionFilter == null ? "null" : "'" + DimensionFilter.Replace("'", "\\'") + "'")}}
                                       evaluationRules: {{EvaluationRules.ToBicepString()}}
                                     }
                  """;

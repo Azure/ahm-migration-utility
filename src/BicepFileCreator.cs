@@ -60,8 +60,10 @@ public class BicepFileCreator
         try
         {
             var location = v1HealthModel.location.ToLower();
+            string? locationChangedFrom = null;
             if (!Utils.SupportedV2Locations.Contains(location))
             {
+                locationChangedFrom = location;
                 logger.LogWarning("Location {location} is not supported in V2. Falling back to {fallbackLocation}",
                     location, Utils.SupportedV2Locations.First());
                 location = Utils.SupportedV2Locations.First();
@@ -104,6 +106,11 @@ public class BicepFileCreator
             var authenticationSettings = new Dictionary<string, AuthenticationSetting>();
             var entities = new Dictionary<string, Entity>();
             var relationships = new Dictionary<string, Relationship>();
+
+            // Migration summary counters
+            int migratedSignalsAzureResource = 0, migratedSignalsLogAnalytics = 0, migratedSignalsPrometheus = 0;
+            int skippedDisabledSignals = 0, skippedTextSignals = 0, skippedNestedHealthModelQueries = 0, skippedUnsupportedTypeSignals = 0;
+            var skippedUnsupportedTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             if (v1HealthModel.identity != null)
             {
@@ -159,6 +166,7 @@ public class BicepFileCreator
                     {
                         DisplayName = node.name,
                         Impact = node.impact,
+                        HealthObjective = node.healthTargetPercentage,
                         CanvasPosition = node.visual == null
                             ? null
                             : new CanvasPosition
@@ -173,6 +181,7 @@ public class BicepFileCreator
 
                 KeyValuePair<string, AuthenticationSetting>? authenticationSetting = null;
                 var queries = node.queries?.Where(q => q.enabledState == "Enabled").ToList();
+                skippedDisabledSignals += node.queries?.Count(q => q.enabledState != "Enabled") ?? 0;
                 if (queries?.Count > 0)
                 {
                     authenticationSetting = authenticationSettings.FirstOrDefault(a =>
@@ -194,6 +203,18 @@ public class BicepFileCreator
                     }
 
                     var signalGroups = new SignalGroups();
+
+                    // Count queries that will not be migrated as signals, by reason.
+                    skippedNestedHealthModelQueries += queries.Count(q => q.queryType == "ResourceMetricsQuery"
+                        && q.metricNamespace.Equals("microsoft.healthmodel/healthmodels", StringComparison.InvariantCultureIgnoreCase));
+                    skippedTextSignals += queries.Count(q => q.dataType == "Text"
+                        && (q.queryType == "LogQuery"
+                            || (q.queryType == "ResourceMetricsQuery"
+                                && !q.metricNamespace.Equals("microsoft.healthmodel/healthmodels", StringComparison.InvariantCultureIgnoreCase))));
+                    var unsupportedTypeQueries = queries.Where(q => q.queryType != "ResourceMetricsQuery"
+                        && q.queryType != "LogQuery" && q.queryType != "PrometheusMetricsQuery").ToList();
+                    skippedUnsupportedTypeSignals += unsupportedTypeQueries.Count;
+                    foreach (var q in unsupportedTypeQueries) skippedUnsupportedTypes.Add(q.queryType);
 
                     // Azure Resource Metric signals
                     var resourceMetricsQueries = queries
@@ -263,6 +284,10 @@ public class BicepFileCreator
                     var prometheusQueries = queries
                         .Where(q => q.queryType == "PrometheusMetricsQuery")
                         .ToList();
+
+                    migratedSignalsAzureResource += resourceMetricsQueries.Count;
+                    migratedSignalsLogAnalytics += logAnalyticsQueries.Count;
+                    migratedSignalsPrometheus += prometheusQueries.Count;
                     if (prometheusQueries.Count != 0)
                     {
                         signalGroups.AzureMonitorWorkspace = new AzureMonitorWorkspaceSignalGroup
@@ -329,6 +354,28 @@ public class BicepFileCreator
                 }
             }
 
+            var totalSignals = migratedSignalsAzureResource + migratedSignalsLogAnalytics + migratedSignalsPrometheus;
+            logger.LogInformation(
+                "Migration summary for '{model}': migrated {entities} entities, {relationships} relationships, {signals} signals (azureResourceMetric={arm}, logAnalytics={la}, prometheus={prom}).",
+                v1HealthModel.name, entities.Count, relationships.Count, totalSignals,
+                migratedSignalsAzureResource, migratedSignalsLogAnalytics, migratedSignalsPrometheus);
+
+            if (skippedDisabledSignals + skippedTextSignals + skippedUnsupportedTypeSignals + skippedNestedHealthModelQueries > 0
+                || locationChangedFrom != null)
+            {
+                logger.LogWarning("Not migrated 1:1 for '{model}':", v1HealthModel.name);
+                if (skippedDisabledSignals > 0)
+                    logger.LogWarning("  - {count} signal(s) skipped: disabled in source (enabledState != 'Enabled').", skippedDisabledSignals);
+                if (skippedTextSignals > 0)
+                    logger.LogWarning("  - {count} signal(s) skipped: dataType 'Text' is not supported in public preview (numeric thresholds only).", skippedTextSignals);
+                if (skippedUnsupportedTypeSignals > 0)
+                    logger.LogWarning("  - {count} signal(s) skipped: unsupported query type(s) [{types}].", skippedUnsupportedTypeSignals, string.Join(", ", skippedUnsupportedTypes));
+                if (skippedNestedHealthModelQueries > 0)
+                    logger.LogWarning("  - {count} nested health model metric quer(y/ies) re-modeled via entity relationship instead of a signal.", skippedNestedHealthModelQueries);
+                if (locationChangedFrom != null)
+                    logger.LogWarning("  - location changed from '{from}' to '{to}' (source region not available in public preview).", locationChangedFrom, location);
+            }
+
             return bicepBuilder.ToString();
         }
         catch (Exception e)
@@ -338,6 +385,28 @@ public class BicepFileCreator
         }
     }
 
+    // Maps Private Preview (v1) signal operator names to the Public Preview
+    // (2026-05-01-preview) SignalOperator enum. v1 used Lower*/*Equals spellings.
+    private static readonly Dictionary<string, string> OperatorMap = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["LowerThan"] = "LessThan",
+        ["LessThan"] = "LessThan",
+        ["LowerOrEquals"] = "LessThanOrEqual",
+        ["LowerThanOrEquals"] = "LessThanOrEqual",
+        ["LessThanOrEqual"] = "LessThanOrEqual",
+        ["GreaterThan"] = "GreaterThan",
+        ["GreaterOrEquals"] = "GreaterThanOrEqual",
+        ["GreaterThanOrEquals"] = "GreaterThanOrEqual",
+        ["GreaterThanOrEqual"] = "GreaterThanOrEqual",
+        ["Equals"] = "Equal",
+        ["Equal"] = "Equal",
+        ["NotEquals"] = "NotEqual",
+        ["NotEqual"] = "NotEqual",
+    };
+
+    private static string MapOperator(string v1Operator)
+        => OperatorMap.TryGetValue(v1Operator, out var mapped) ? mapped : v1Operator;
+
     private static EvaluationRules CreateEvaluationRules(
         string unhealthyOperator, string unhealthyThreshold,
         string? degradedOperator, string? degradedThreshold)
@@ -346,14 +415,14 @@ public class BicepFileCreator
         {
             UnhealthyRule = new ThresholdRule
             {
-                Operator = unhealthyOperator,
+                Operator = MapOperator(unhealthyOperator),
                 Threshold = double.Parse(unhealthyThreshold)
             },
             DegradedRule = string.IsNullOrEmpty(degradedOperator) || string.IsNullOrEmpty(degradedThreshold)
                 ? null
                 : new ThresholdRule
                 {
-                    Operator = degradedOperator,
+                    Operator = MapOperator(degradedOperator),
                     Threshold = double.Parse(degradedThreshold)
                 }
         };
