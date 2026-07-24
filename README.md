@@ -157,6 +157,59 @@ python python/health_model_converter.py convert file --help
 python python/health_model_converter.py convert azure --help
 ```
 
+## Bulk conversion: convert all models in a resource group
+
+To migrate **every** private preview health model in a resource group at once, use the
+helper scripts in the [`scripts/`](./scripts) folder. Both enumerate all
+`Microsoft.HealthModel/healthmodels` resources in the resource group with the Azure CLI,
+then run the migration tool's `convert azure` mode for each model and print a summary of
+converted and failed models at the end.
+
+Prerequisites: Azure CLI, logged in via `az login`.
+
+### PowerShell (.NET tool)
+
+```powershell
+# Generate Bicep files (default)
+./scripts/Convert-AllModels.ps1 `
+  -SubscriptionId <subscription-id> `
+  -ResourceGroup <resource-group> `
+  -OutputFolder ./output `
+  -ToolPath ./Microsoft.CloudHealth.PreviewMigration.exe
+
+# Generate ARM templates instead
+./scripts/Convert-AllModels.ps1 `
+  -SubscriptionId <subscription-id> `
+  -ResourceGroup <resource-group> `
+  -OutputFolder ./output `
+  -ToolPath ./Microsoft.CloudHealth.PreviewMigration.exe `
+  -ArmTemplate
+```
+
+### Python (cross-platform)
+
+```bash
+# Install the converter's Azure dependencies once
+pip install -r python/requirements.txt
+
+# Generate Bicep files (default)
+python scripts/convert_all_models.py \
+  --subscription <subscription-id> \
+  --resource-group <resource-group> \
+  --outputfolder ./output
+
+# Generate ARM templates instead
+python scripts/convert_all_models.py \
+  --subscription <subscription-id> \
+  --resource-group <resource-group> \
+  --outputfolder ./output --armtemplate
+```
+
+> Both scripts authenticate through the tool's `DefaultAzureCredential`. On a developer
+> machine they default `AZURE_TOKEN_CREDENTIALS=dev`, so your `az login` session is used
+> and the slow managed-identity/IMDS probe is skipped. Set `AZURE_TOKEN_CREDENTIALS`
+> yourself (for example to `prod`) before running to override this default.
+
 ## Deploy new resource to Azure
 
 After you executed the commands above, in your specified output folder you will find a Bicep or ARM template file. You can use that to directly deploy a new health model resource to Azure:
