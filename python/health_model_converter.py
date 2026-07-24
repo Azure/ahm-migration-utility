@@ -31,10 +31,14 @@ except ImportError:
 # Constants
 # ============================================================================
 
-SUPPORTED_V2_LOCATIONS = ["canadacentral", "uksouth"]
+SUPPORTED_V2_LOCATIONS = [
+    "canadacentral", "australiaeast", "centralus", "eastasia", "eastus", "eastus2",
+    "germanywestcentral", "italynorth", "northeurope", "southeastasia",
+    "swedencentral", "switzerlandnorth", "uksouth",
+]
 PROVIDER_NAMESPACE = "Microsoft.CloudHealth"
 HEALTH_MODELS_RESOURCE_TYPE = "healthmodels"
-API_VERSION = "2026-01-01-preview"
+API_VERSION = "2026-05-01-preview"
 
 # ============================================================================
 # Utility Functions
@@ -114,6 +118,7 @@ class V1Node:
     logAnalyticsWorkspaceId: str = ""
     azureMonitorWorkspaceResourceId: str = ""
     queryEndpoint: str = ""
+    healthTargetPercentage: Optional[float] = None
 
 @dataclass
 class V1Properties:
@@ -161,7 +166,32 @@ class V1HealthModel:
 
 class BicepBuilder:
     """Helper class to build Bicep templates."""
-    
+
+    # Maps Private Preview (v1) signal operator names to the Public Preview
+    # (2026-05-01-preview) SignalOperator enum. v1 used Lower*/*Equals spellings.
+    OPERATOR_MAP = {
+        "lowerthan": "LessThan",
+        "lessthan": "LessThan",
+        "lowerorequals": "LessThanOrEqual",
+        "lowerthanorequals": "LessThanOrEqual",
+        "lessthanorequal": "LessThanOrEqual",
+        "greaterthan": "GreaterThan",
+        "greaterorequals": "GreaterThanOrEqual",
+        "greaterthanorequals": "GreaterThanOrEqual",
+        "greaterthanorequal": "GreaterThanOrEqual",
+        "equals": "Equal",
+        "equal": "Equal",
+        "notequals": "NotEqual",
+        "notequal": "NotEqual",
+    }
+
+    @staticmethod
+    def map_operator(v1_operator: str) -> str:
+        """Translate a v1 operator name to the v2 SignalOperator enum value."""
+        if not v1_operator:
+            return v1_operator
+        return BicepBuilder.OPERATOR_MAP.get(v1_operator.lower(), v1_operator)
+
     @staticmethod
     def format_tags(tags: Optional[Dict[str, str]]) -> str:
         """Format tags for Bicep."""
@@ -195,8 +225,10 @@ class BicepBuilder:
     def format_evaluation_rules(unhealthy_operator: str, unhealthy_threshold: str,
                                 degraded_operator: str, degraded_threshold: str) -> str:
         """Format evaluation rules for Bicep."""
+        unhealthy_operator = BicepBuilder.map_operator(unhealthy_operator)
         degraded_str = ""
         if degraded_operator and degraded_threshold:
+            degraded_operator = BicepBuilder.map_operator(degraded_operator)
             degraded_str = f"""
                     degradedRule: {{
                       operator: '{degraded_operator}'
@@ -269,11 +301,13 @@ class AuthenticationSetting:
 class Entity:
     """Entity resource."""
     
-    def __init__(self, name: str, display_name: str, impact: str, canvas_position: Optional[Tuple[int, int]]):
+    def __init__(self, name: str, display_name: str, impact: str, canvas_position: Optional[Tuple[int, int]],
+                 health_objective: Optional[float] = None):
         self.name = name
         self.display_name = display_name
         self.impact = impact
         self.canvas_position = canvas_position
+        self.health_objective = health_objective
         self.type = f"{PROVIDER_NAMESPACE}/{HEALTH_MODELS_RESOURCE_TYPE}/entities"
         self.api_version = API_VERSION
         self.signal_groups = {}
@@ -315,13 +349,24 @@ class Entity:
         
         signal_groups_str = self._build_signal_groups_string()
         depends_str = BicepBuilder.format_depends_on(depends_on)
-        
+
+        health_objective_str = ""
+        if self.health_objective is not None:
+            ho = self.health_objective
+            # Bicep has no floating-point literals: emit whole numbers as integers and
+            # fractional values via json('...') (ARM evaluates it to the numeric value).
+            if float(ho) == int(ho):
+                ho_literal = str(int(ho))
+            else:
+                ho_literal = f"json('{ho}')"
+            health_objective_str = f"\n    healthObjective: {ho_literal}"
+
         return f"""resource {symbolic_name} '{self.type}@{self.api_version}' = {{
   parent: {parent}
   name: {name_str}
   properties: {{
     displayName: '{self.display_name}'
-    impact: '{self.impact}'
+    impact: '{self.impact}'{health_objective_str}
     canvasPosition: {canvas_str}
     signalGroups: {signal_groups_str}
   }}
@@ -386,8 +431,16 @@ class Entity:
 
 def build_azure_resource_signal_bicep(query: 'V1Query') -> str:
     """Build Bicep string for an Azure Resource Metric signal instance."""
-    dimension_str = "null" if not query.dimension else f"'{query.dimension}'"
-    dimension_filter_str = "null" if not query.dimensionFilter else f"'{query.dimensionFilter}'"
+    # API version 2026-05-01-preview removed the separate 'dimension' property.
+    # The dimension and its optional filter are now combined into a single OData
+    # 'dimensionFilter' expression: "<dimension> eq '<filter|*>'".
+    if query.dimension:
+        filter_value = query.dimensionFilter if query.dimensionFilter else "*"
+        combined_filter = f"{query.dimension} eq '{filter_value}'"
+        # Escape single quotes for embedding inside a Bicep single-quoted string.
+        dimension_filter_str = "'" + combined_filter.replace("'", "\\'") + "'"
+    else:
+        dimension_filter_str = "null"
     data_unit_str = "null" if not query.dataUnit else f"'{query.dataUnit}'"
     eval_rules = BicepBuilder.format_evaluation_rules(
         query.unhealthyOperator, query.unhealthyThreshold,
@@ -403,7 +456,6 @@ def build_azure_resource_signal_bicep(query: 'V1Query') -> str:
           timeGrain: '{query.timeGrain}'
           refreshInterval: 'PT1M'
           aggregationType: '{query.aggregationType}'
-          dimension: {dimension_str}
           dimensionFilter: {dimension_filter_str}
           evaluationRules: {eval_rules}
         }}"""
@@ -512,7 +564,9 @@ class HealthModelConverter:
         try:
             # Validate and set location
             location = v1_model.location.lower()
+            location_changed_from = None
             if location not in SUPPORTED_V2_LOCATIONS:
+                location_changed_from = location
                 self.logger.warning(f"Location '{location}' is not supported in V2. Falling back to '{SUPPORTED_V2_LOCATIONS[0]}'")
                 location = SUPPORTED_V2_LOCATIONS[0]
             
@@ -540,6 +594,16 @@ class HealthModelConverter:
             authentication_settings = {}
             entities = {}
             relationships = {}
+
+            # Migration summary counters
+            migrated_signals_azure_resource = 0
+            migrated_signals_log_analytics = 0
+            migrated_signals_prometheus = 0
+            skipped_disabled_signals = 0
+            skipped_text_signals = 0
+            skipped_nested_healthmodel_queries = 0
+            skipped_unsupported_type_signals = 0
+            skipped_unsupported_types = set()
             
             # Create authentication settings
             if v1_model.identity:
@@ -573,15 +637,33 @@ class HealthModelConverter:
                 if node.visual:
                     canvas_pos = (node.visual.x, node.visual.y)
                 
-                entity = Entity(node_name, node.name, node.impact, canvas_pos)
+                entity = Entity(node_name, node.name, node.impact, canvas_pos, node.healthTargetPercentage)
                 
                 depends_on = []
                 
                 # Process queries for this entity
                 if node.queries:
                     enabled_queries = [q for q in node.queries if q.enabledState == "Enabled"]
-                    
+                    skipped_disabled_signals += sum(1 for q in node.queries if q.enabledState != "Enabled")
+
                     if enabled_queries:
+                        # Count queries that will not be migrated as signals, by reason.
+                        skipped_nested_healthmodel_queries += sum(
+                            1 for q in enabled_queries
+                            if q.queryType == "ResourceMetricsQuery"
+                            and q.metricNamespace.lower() == "microsoft.healthmodel/healthmodels")
+                        skipped_text_signals += sum(
+                            1 for q in enabled_queries
+                            if q.dataType == "Text"
+                            and (q.queryType == "LogQuery"
+                                 or (q.queryType == "ResourceMetricsQuery"
+                                     and q.metricNamespace.lower() != "microsoft.healthmodel/healthmodels")))
+                        unsupported_type_queries = [
+                            q for q in enabled_queries
+                            if q.queryType not in ("ResourceMetricsQuery", "LogQuery", "PrometheusMetricsQuery")]
+                        skipped_unsupported_type_signals += len(unsupported_type_queries)
+                        skipped_unsupported_types.update(q.queryType for q in unsupported_type_queries)
+
                         # Find authentication setting
                         auth_setting_key = None
                         for key, auth in authentication_settings.items():
@@ -606,6 +688,10 @@ class HealthModelConverter:
                                            if q.queryType == "LogQuery" and q.dataType != "Text"]
                             prometheus = [q for q in enabled_queries 
                                         if q.queryType == "PrometheusMetricsQuery"]
+
+                            migrated_signals_azure_resource += len(resource_metrics)
+                            migrated_signals_log_analytics += len(log_analytics)
+                            migrated_signals_prometheus += len(prometheus)
                             
                             # Add Azure Resource signal group with inline signals
                             if resource_metrics:
@@ -688,6 +774,31 @@ class HealthModelConverter:
                             symbolic_name, model_symbolic_name
                         ))
             
+            total_signals = (migrated_signals_azure_resource
+                             + migrated_signals_log_analytics
+                             + migrated_signals_prometheus)
+            self.logger.info(
+                f"Migration summary for '{v1_model.name}': migrated {len(entities)} entities, "
+                f"{len(relationships)} relationships, {total_signals} signals "
+                f"(azureResourceMetric={migrated_signals_azure_resource}, "
+                f"logAnalytics={migrated_signals_log_analytics}, "
+                f"prometheus={migrated_signals_prometheus}).")
+
+            if (skipped_disabled_signals + skipped_text_signals
+                    + skipped_unsupported_type_signals + skipped_nested_healthmodel_queries > 0
+                    or location_changed_from is not None):
+                self.logger.warning(f"Not migrated 1:1 for '{v1_model.name}':")
+                if skipped_disabled_signals > 0:
+                    self.logger.warning(f"  - {skipped_disabled_signals} signal(s) skipped: disabled in source (enabledState != 'Enabled').")
+                if skipped_text_signals > 0:
+                    self.logger.warning(f"  - {skipped_text_signals} signal(s) skipped: dataType 'Text' is not supported in public preview (numeric thresholds only).")
+                if skipped_unsupported_type_signals > 0:
+                    self.logger.warning(f"  - {skipped_unsupported_type_signals} signal(s) skipped: unsupported query type(s) [{', '.join(sorted(skipped_unsupported_types))}].")
+                if skipped_nested_healthmodel_queries > 0:
+                    self.logger.warning(f"  - {skipped_nested_healthmodel_queries} nested health model metric quer(y/ies) re-modeled via entity relationship instead of a signal.")
+                if location_changed_from is not None:
+                    self.logger.warning(f"  - location changed from '{location_changed_from}' to '{location}' (source region not available in public preview).")
+
             return "\n".join(bicep_lines)
             
         except Exception as e:
@@ -782,7 +893,8 @@ class HealthModelConverter:
                     logAnalyticsResourceId=node_data.get('logAnalyticsResourceId', ''),
                     logAnalyticsWorkspaceId=node_data.get('logAnalyticsWorkspaceId', ''),
                     azureMonitorWorkspaceResourceId=node_data.get('azureMonitorWorkspaceResourceId', ''),
-                    queryEndpoint=node_data.get('queryEndpoint', '')
+                    queryEndpoint=node_data.get('queryEndpoint', ''),
+                    healthTargetPercentage=node_data.get('healthTargetPercentage')
                 )
                 nodes.append(node)
         

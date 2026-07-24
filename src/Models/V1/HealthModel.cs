@@ -54,7 +54,8 @@ public record Node(
     string logAnalyticsResourceId,
     string logAnalyticsWorkspaceId,
     string azureMonitorWorkspaceResourceId,
-    string queryEndpoint
+    string queryEndpoint,
+    double? healthTargetPercentage = null
 );
 
 public record Visual(

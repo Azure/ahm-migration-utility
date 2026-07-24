@@ -6,7 +6,7 @@ public class AuthenticationSetting : IResourceType
 {
     public required string Name { get; set; }
     public string Type => $"{Constants.ProviderNamespace}/{Constants.HealthModelsResourceType}/authenticationSettings";
-    public string ApiVersion => "2026-01-01-preview";
+    public string ApiVersion => "2026-05-01-preview";
     public required ManagedIdentityAuthenticationSettingProperties Properties { get; set; }
 
     public string ToBicepString(string symbolicName,

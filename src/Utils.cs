@@ -7,7 +7,12 @@ namespace Microsoft.CloudHealth.PreviewMigration;
 
 public static class Utils
 {
-    public static readonly string[] SupportedV2Locations = ["canadacentral", "uksouth"];
+    public static readonly string[] SupportedV2Locations =
+    [
+        "canadacentral", "australiaeast", "centralus", "eastasia", "eastus", "eastus2",
+        "germanywestcentral", "italynorth", "northeurope", "southeastasia",
+        "swedencentral", "switzerlandnorth", "uksouth"
+    ];
     
     public static Guid GenerateDeterministicGuid(this string input)
     {
