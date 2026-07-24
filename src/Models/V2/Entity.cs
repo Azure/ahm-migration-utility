@@ -7,7 +7,7 @@ public class Entity : IResourceType
 {
     public required string Name { get; set; }
     public string Type => $"{Constants.ProviderNamespace}/{Constants.HealthModelsResourceType}/entities";
-    public string ApiVersion => "2026-01-01-preview";
+    public string ApiVersion => "2026-05-01-preview";
 
     public required EntityProperties Properties { get; set; }
 
@@ -229,7 +229,6 @@ public class AzureResourceSignalInstance
     public required string TimeGrain { get; set; }
     public string RefreshInterval { get; set; } = "PT1M";
     public required string AggregationType { get; set; }
-    public string? Dimension { get; set; }
     public string? DimensionFilter { get; set; }
     public required EvaluationRules EvaluationRules { get; set; }
 
@@ -246,7 +245,6 @@ public class AzureResourceSignalInstance
                                       timeGrain: '{{TimeGrain}}'
                                       refreshInterval: '{{RefreshInterval}}'
                                       aggregationType: '{{AggregationType}}'
-                                      dimension: {{(Dimension == null ? "null" : "'" + Dimension + "'")}}
                                       dimensionFilter: {{(DimensionFilter == null ? "null" : "'" + DimensionFilter + "'")}}
                                       evaluationRules: {{EvaluationRules.ToBicepString()}}
                                     }

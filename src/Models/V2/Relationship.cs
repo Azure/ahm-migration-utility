@@ -6,7 +6,7 @@ public class Relationship : IResourceType
 {
     public required string Name { get; set; }
     public string Type => $"{Constants.ProviderNamespace}/{Constants.HealthModelsResourceType}/relationships";
-    public string ApiVersion => "2026-01-01-preview";
+    public string ApiVersion => "2026-05-01-preview";
     public required RelationshipProperties Properties { get; set; }
 
     public required string ParentEntitySymbolicName { get; set; }

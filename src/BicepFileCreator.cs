@@ -229,8 +229,7 @@ public class BicepFileCreator
                                 TimeGrain = q.timeGrain,
                                 AggregationType = q.aggregationType,
                                 DataUnit = q.dataUnit,
-                                Dimension = q.dimension,
-                                DimensionFilter = q.dimensionFilter,
+                                DimensionFilter = !string.IsNullOrEmpty(q.dimension) ? (q.dimension + " eq '" + (!string.IsNullOrEmpty(q.dimensionFilter) ? q.dimensionFilter : "*") + "'") : null,
                                 EvaluationRules = CreateEvaluationRules(q.unhealthyOperator, q.unhealthyThreshold, q.degradedOperator, q.degradedThreshold)
                             }).ToList()
                         };

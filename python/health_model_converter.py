@@ -34,7 +34,7 @@ except ImportError:
 SUPPORTED_V2_LOCATIONS = ["canadacentral", "uksouth"]
 PROVIDER_NAMESPACE = "Microsoft.CloudHealth"
 HEALTH_MODELS_RESOURCE_TYPE = "healthmodels"
-API_VERSION = "2026-01-01-preview"
+API_VERSION = "2026-05-01-preview"
 
 # ============================================================================
 # Utility Functions
