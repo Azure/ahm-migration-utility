@@ -20,7 +20,12 @@ from datetime import datetime
 
 # Azure SDK imports (optional - for Azure resource conversion)
 try:
-    from azure.identity import DefaultAzureCredential
+    from azure.identity import (
+        AzureCliCredential,
+        AzurePowerShellCredential,
+        InteractiveBrowserCredential,
+        ChainedTokenCredential,
+    )
     from azure.core.credentials import AccessToken
     import requests
     AZURE_SDK_AVAILABLE = True
@@ -194,10 +199,15 @@ class BicepBuilder:
 
     @staticmethod
     def format_tags(tags: Optional[Dict[str, str]]) -> str:
-        """Format tags for Bicep."""
+        """Format tags for Bicep. Keys and values are quoted and single-quote-escaped
+        so tags with special characters (e.g. 'Foo-Bar') produce valid Bicep."""
         if not tags:
             return "null"
-        items = [f"    {k}: '{v}'" for k, v in tags.items()]
+
+        def esc(value: Any) -> str:
+            return str(value).replace("'", "\\'")
+
+        items = [f"    '{esc(k)}': '{esc(v)}'" for k, v in tags.items()]
         return "{\n" + "\n".join(items) + "\n  }"
     
     @staticmethod
@@ -1032,9 +1042,17 @@ class HealthModelConverter:
                 self.logger.error(f"Invalid resource ID format: {resource_id}")
                 return None
             
-            # Get Azure credentials
+            # Get Azure credentials.
+            # Deliberately avoid Managed Identity / Workload Identity credentials: this is
+            # an interactive developer tool, not an Azure-hosted workload. Probing IMDS
+            # (169.254.169.254) just hangs or fails on machines not running in Azure.
+            # Prefer already-signed-in developer credentials and fall back to interactive browser.
             self.logger.info("Getting access token for ARM...")
-            credential = DefaultAzureCredential()
+            credential = ChainedTokenCredential(
+                AzureCliCredential(),
+                AzurePowerShellCredential(),
+                InteractiveBrowserCredential(),
+            )
             token = credential.get_token("https://management.azure.com/.default")
             
             # Construct URL for the health model resource
@@ -1067,13 +1085,32 @@ class HealthModelConverter:
             
         except Exception as e:
             self.logger.error(f"Failed to fetch health model from Azure: {str(e)}")
-            if "DefaultAzureCredential" in str(e):
+            if "credential" in str(e).lower() or "token" in str(e).lower():
                 self.logger.error("Authentication failed. Please ensure you are logged in to Azure (e.g., 'az login')")
             return None
 
 # ============================================================================
 # Main CLI Application
 # ============================================================================
+
+def _normalize_option_case(argv: List[str]) -> List[str]:
+    """Lowercase the NAME portion of option tokens (e.g. '--ResourceId' -> '--resourceid',
+    '-R' -> '-r') so command-line options are matched case-insensitively. Option values,
+    including anything after '=', are left untouched."""
+    normalized: List[str] = []
+    for token in argv:
+        if token.startswith("--"):
+            if "=" in token:
+                name, value = token.split("=", 1)
+                normalized.append(name.lower() + "=" + value)
+            else:
+                normalized.append(token.lower())
+        elif len(token) > 1 and token[0] == "-" and token[1] != "-" and token[1:].isalpha():
+            normalized.append(token.lower())
+        else:
+            normalized.append(token)
+    return normalized
+
 
 def main():
     """Main entry point for the CLI application."""
@@ -1141,7 +1178,7 @@ Required packages for Azure conversion:
         help='Compile the Bicep output to ARM template JSON (requires az bicep)'
     )
     
-    args = parser.parse_args()
+    args = parser.parse_args(_normalize_option_case(sys.argv[1:]))
     
     # Setup logger
     logger = setup_logger()
