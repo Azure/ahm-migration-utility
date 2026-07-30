@@ -205,10 +205,9 @@ python scripts/convert_all_models.py \
   --outputfolder ./output --armtemplate
 ```
 
-> Both scripts authenticate through the tool's `DefaultAzureCredential`. On a developer
-> machine they default `AZURE_TOKEN_CREDENTIALS=dev`, so your `az login` session is used
-> and the slow managed-identity/IMDS probe is skipped. Set `AZURE_TOKEN_CREDENTIALS`
-> yourself (for example to `prod`) before running to override this default.
+> Both scripts convert each model with the tool's `convert azure` mode, which signs in
+> with your existing developer credentials (for example your `az login` session) and
+> falls back to an interactive browser sign-in if needed.
 
 ## Deploy new resource to Azure
 

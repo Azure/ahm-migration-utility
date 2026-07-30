@@ -40,8 +40,15 @@ public class ConvertFromAzureResourceCommand : AsyncCommand<ConvertFromAzureReso
     {
         var logger = Utils.CreateLogger();
         logger.LogInformation("Getting access token for ARM...");
-        var tokenCredential =
-            new DefaultAzureCredential(includeInteractiveCredentials: true); // CodeQL [SM05137] This is a helper tool which is not used in production environments, so it is safe to use DefaultAzureCredential with all options enabled.
+        // Deliberately avoid Managed Identity / Workload Identity credentials: this is an
+        // interactive developer tool, not an Azure-hosted workload. Probing IMDS
+        // (169.254.169.254) just hangs or fails on machines that are not running in Azure.
+        // Prefer already-signed-in developer credentials and fall back to interactive browser.
+        var tokenCredential = new ChainedTokenCredential(
+            new AzureCliCredential(),
+            new AzurePowerShellCredential(),
+            new VisualStudioCredential(),
+            new InteractiveBrowserCredential());
         var token = (await tokenCredential.GetTokenAsync(new TokenRequestContext(["https://management.azure.com/.default"]))).Token;
         var httpClient = new HttpClient();
         var request = new HttpRequestMessage

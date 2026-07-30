@@ -24,7 +24,8 @@ public class HealthModel : IResourceType
         var identityString = Identity == null ? "null" : Identity.ToBicepString();
         var tagsString = Tags == null
             ? "null"
-            : "{\n    " + string.Join("\n    ", Tags.Select(kvp => $$"""{{kvp.Key}}: '{{kvp.Value}}'""")) + "\n  }";
+            : "{\n    " + string.Join("\n    ",
+                Tags.Select(kvp => $"'{kvp.Key.Replace("'", "\\'")}': '{kvp.Value.Replace("'", "\\'")}'")) + "\n  }";
 
         var template = $$"""
                          resource {{symbolicName}} '{{Type}}@{{ApiVersion}}' = {

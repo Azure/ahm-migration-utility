@@ -59,11 +59,6 @@ def list_model_ids(subscription: str, resource_group: str) -> list[str]:
 def main() -> int:
     args = parse_args()
 
-    # The converter authenticates via DefaultAzureCredential. On a developer machine
-    # prefer developer credentials (e.g. 'az login') and skip the slow
-    # managed-identity/IMDS probe. Set AZURE_TOKEN_CREDENTIALS yourself to override.
-    os.environ.setdefault("AZURE_TOKEN_CREDENTIALS", "dev")
-
     os.makedirs(args.outputfolder, exist_ok=True)
 
     print(f"Listing health models in resource group '{args.resource_group}'...")

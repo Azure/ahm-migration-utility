@@ -46,11 +46,6 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# The tool authenticates via DefaultAzureCredential. On a developer machine prefer
-# developer credentials (e.g. 'az login') and skip the slow managed-identity/IMDS probe.
-# Set AZURE_TOKEN_CREDENTIALS yourself (e.g. 'prod') to override this default.
-if (-not $env:AZURE_TOKEN_CREDENTIALS) { $env:AZURE_TOKEN_CREDENTIALS = 'dev' }
-
 New-Item -ItemType Directory -Force -Path $OutputFolder | Out-Null
 
 Write-Host "Listing health models in resource group '$ResourceGroup'..."
