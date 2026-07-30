@@ -1093,6 +1093,25 @@ class HealthModelConverter:
 # Main CLI Application
 # ============================================================================
 
+def _normalize_option_case(argv: List[str]) -> List[str]:
+    """Lowercase the NAME portion of option tokens (e.g. '--ResourceId' -> '--resourceid',
+    '-R' -> '-r') so command-line options are matched case-insensitively. Option values,
+    including anything after '=', are left untouched."""
+    normalized: List[str] = []
+    for token in argv:
+        if token.startswith("--"):
+            if "=" in token:
+                name, value = token.split("=", 1)
+                normalized.append(name.lower() + "=" + value)
+            else:
+                normalized.append(token.lower())
+        elif len(token) > 1 and token[0] == "-" and token[1] != "-" and token[1:].isalpha():
+            normalized.append(token.lower())
+        else:
+            normalized.append(token)
+    return normalized
+
+
 def main():
     """Main entry point for the CLI application."""
     parser = argparse.ArgumentParser(
@@ -1159,7 +1178,7 @@ Required packages for Azure conversion:
         help='Compile the Bicep output to ARM template JSON (requires az bicep)'
     )
     
-    args = parser.parse_args()
+    args = parser.parse_args(_normalize_option_case(sys.argv[1:]))
     
     # Setup logger
     logger = setup_logger()

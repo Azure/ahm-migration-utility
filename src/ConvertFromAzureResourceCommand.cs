@@ -89,6 +89,6 @@ public class ConvertFromAzureResourceCommand : AsyncCommand<ConvertFromAzureReso
 
 public class ConvertFromAzureResourceSettings : Program.ConvertSettings
 {
-    [CommandOption("-r|--resourceId <resourceId>")]
+    [CommandOption("-r|--resourceid <resourceId>")]
     public required string ResourceId { get; set; }
 }
