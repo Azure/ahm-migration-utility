@@ -13,6 +13,7 @@ import sys
 import re
 import subprocess
 import tempfile
+import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
@@ -50,13 +51,14 @@ API_VERSION = "2026-05-01-preview"
 # ============================================================================
 
 def generate_deterministic_guid(input_string: str) -> str:
-    """Generate a deterministic GUID from an input string."""
-    input_bytes = input_string.encode('utf-8')
-    hash_bytes = hashlib.sha256(input_bytes).digest()
-    # Take first 16 bytes for GUID
-    guid_bytes = hash_bytes[:16]
-    # Format as GUID string
-    return f"{guid_bytes[:4].hex()}-{guid_bytes[4:6].hex()}-{guid_bytes[6:8].hex()}-{guid_bytes[8:10].hex()}-{guid_bytes[10:16].hex()}"
+    """Generate a deterministic GUID from an input string.
+
+    The byte layout matches .NET's `new Guid(byte[])`, which interprets the first
+    three fields (4/2/2 bytes) as little-endian. Both converters must produce the
+    same resource names for the same input.
+    """
+    guid_bytes = hashlib.sha256(input_string.encode('utf-8')).digest()[:16]
+    return str(uuid.UUID(bytes_le=guid_bytes))
 
 def setup_logger(name: str = "HealthModelConverter") -> logging.Logger:
     """Setup and return a logger instance."""
@@ -611,7 +613,7 @@ class HealthModelConverter:
             migrated_signals_prometheus = 0
             skipped_disabled_signals = 0
             skipped_text_signals = 0
-            skipped_nested_healthmodel_queries = 0
+            dropped_nested_healthmodel_queries = 0
             skipped_unsupported_type_signals = 0
             skipped_unsupported_types = set()
             
@@ -650,94 +652,105 @@ class HealthModelConverter:
                 entity = Entity(node_name, node.name, node.impact, canvas_pos, node.healthTargetPercentage)
                 
                 depends_on = []
-                
-                # Process queries for this entity
-                if node.queries:
-                    enabled_queries = [q for q in node.queries if q.enabledState == "Enabled"]
-                    skipped_disabled_signals += sum(1 for q in node.queries if q.enabledState != "Enabled")
 
-                    if enabled_queries:
-                        # Count queries that will not be migrated as signals, by reason.
-                        skipped_nested_healthmodel_queries += sum(
-                            1 for q in enabled_queries
-                            if q.queryType == "ResourceMetricsQuery"
-                            and q.metricNamespace.lower() == "microsoft.healthmodel/healthmodels")
-                        skipped_text_signals += sum(
-                            1 for q in enabled_queries
-                            if q.dataType == "Text"
-                            and (q.queryType == "LogQuery"
-                                 or (q.queryType == "ResourceMetricsQuery"
-                                     and q.metricNamespace.lower() != "microsoft.healthmodel/healthmodels")))
-                        unsupported_type_queries = [
-                            q for q in enabled_queries
-                            if q.queryType not in ("ResourceMetricsQuery", "LogQuery", "PrometheusMetricsQuery")]
-                        skipped_unsupported_type_signals += len(unsupported_type_queries)
-                        skipped_unsupported_types.update(q.queryType for q in unsupported_type_queries)
+                enabled_queries = [q for q in (node.queries or []) if q.enabledState == "Enabled"]
+                skipped_disabled_signals += sum(1 for q in (node.queries or []) if q.enabledState != "Enabled")
 
-                        # Find authentication setting
-                        auth_setting_key = None
+                # A node pointing at another health model must keep the reference (rewritten to the
+                # new resource provider) even when no queries remain after filtering: in the public
+                # preview a nested health model no longer needs explicit health score metrics.
+                is_nested_health_model = bool(node.azureResourceId) and \
+                    "microsoft.healthmodel/healthmodels" in node.azureResourceId.lower()
+
+                if enabled_queries or is_nested_health_model:
+                    # Count queries that will not be migrated as signals, by reason.
+                    dropped_nested_healthmodel_queries += sum(
+                        1 for q in enabled_queries
+                        if q.queryType == "ResourceMetricsQuery"
+                        and q.metricNamespace.lower() == "microsoft.healthmodel/healthmodels")
+                    skipped_text_signals += sum(
+                        1 for q in enabled_queries
+                        if q.dataType == "Text"
+                        and (q.queryType == "LogQuery"
+                             or (q.queryType == "ResourceMetricsQuery"
+                                 and q.metricNamespace.lower() != "microsoft.healthmodel/healthmodels")))
+                    unsupported_type_queries = [
+                        q for q in enabled_queries
+                        if q.queryType not in ("ResourceMetricsQuery", "LogQuery", "PrometheusMetricsQuery")]
+                    skipped_unsupported_type_signals += len(unsupported_type_queries)
+                    skipped_unsupported_types.update(q.queryType for q in unsupported_type_queries)
+
+                    # Find authentication setting
+                    auth_setting_key = None
+                    if node.credentialId:
                         for key, auth in authentication_settings.items():
                             if auth.managed_identity_name.lower().endswith(node.credentialId.lower()):
                                 auth_setting_key = key
                                 break
+                    
+                    if not auth_setting_key and authentication_settings:
+                        # Use first available auth setting as fallback
+                        auth_setting_key = list(authentication_settings.keys())[0]
+                        self.logger.warning(f"Using default authentication setting for entity {node_name}")
+                    
+                    if auth_setting_key:
+                        auth_setting = authentication_settings[auth_setting_key]
                         
-                        if not auth_setting_key and authentication_settings:
-                            # Use first available auth setting as fallback
-                            auth_setting_key = list(authentication_settings.keys())[0]
-                            self.logger.warning(f"Using default authentication setting for entity {node_name}")
-                        
-                        if auth_setting_key:
-                            auth_setting = authentication_settings[auth_setting_key]
-                            
-                            # Group queries by type
-                            resource_metrics = [q for q in enabled_queries 
-                                               if q.queryType == "ResourceMetricsQuery" and 
-                                               q.metricNamespace.lower() != "microsoft.healthmodel/healthmodels" and
-                                               q.dataType != "Text"]
-                            log_analytics = [q for q in enabled_queries 
-                                           if q.queryType == "LogQuery" and q.dataType != "Text"]
-                            prometheus = [q for q in enabled_queries 
-                                        if q.queryType == "PrometheusMetricsQuery"]
+                        # Group queries by type
+                        resource_metrics = [q for q in enabled_queries 
+                                           if q.queryType == "ResourceMetricsQuery" and 
+                                           q.metricNamespace.lower() != "microsoft.healthmodel/healthmodels" and
+                                           q.dataType != "Text"]
+                        log_analytics = [q for q in enabled_queries 
+                                       if q.queryType == "LogQuery" and q.dataType != "Text"]
+                        prometheus = [q for q in enabled_queries 
+                                    if q.queryType == "PrometheusMetricsQuery"]
 
-                            migrated_signals_azure_resource += len(resource_metrics)
-                            migrated_signals_log_analytics += len(log_analytics)
-                            migrated_signals_prometheus += len(prometheus)
-                            
-                            # Add Azure Resource signal group with inline signals
-                            if resource_metrics:
-                                azure_resource_id = node.azureResourceId
-                                # Handle nested health models
-                                if "microsoft.healthmodel/healthmodels" in azure_resource_id.lower():
-                                    azure_resource_id = azure_resource_id.replace(
-                                        "microsoft.healthmodel/healthmodels",
-                                        "Microsoft.CloudHealth/healthmodels"
-                                    )
-                                    self.logger.info(f"Replacing resource provider for nested health model {node_name}")
-                                
-                                signals = [{'bicep': build_azure_resource_signal_bicep(q)} for q in resource_metrics]
-                                entity.add_azure_resource_signals(
+                        migrated_signals_azure_resource += len(resource_metrics)
+                        migrated_signals_log_analytics += len(log_analytics)
+                        migrated_signals_prometheus += len(prometheus)
+                        
+                        # Add Azure Resource signal group with inline signals
+                        if resource_metrics or is_nested_health_model:
+                            azure_resource_id = node.azureResourceId
+                            # Handle nested health models
+                            if is_nested_health_model:
+                                azure_resource_id = re.sub(
+                                    r"microsoft\.healthmodel/healthmodels",
+                                    "Microsoft.CloudHealth/healthmodels",
                                     azure_resource_id,
-                                    auth_setting_key,
-                                    signals
+                                    flags=re.IGNORECASE
                                 )
+                                self.logger.info(
+                                    f"Replacing 'microsoft.healthmodel/healthmodels' with "
+                                    f"'Microsoft.CloudHealth/healthmodels' in azureResourceId for nested health "
+                                    f"model {node_name}. Ensure that the nested health model is also being "
+                                    f"converted and resides in the same resource group as before!")
                             
-                            # Add Log Analytics signal group with inline signals
-                            if log_analytics and node.logAnalyticsResourceId:
-                                signals = [{'bicep': build_log_analytics_signal_bicep(q)} for q in log_analytics]
-                                entity.add_log_analytics_signals(
-                                    node.logAnalyticsResourceId,
-                                    auth_setting_key,
-                                    signals
-                                )
-                            
-                            # Add Prometheus signal group with inline signals
-                            if prometheus and node.azureMonitorWorkspaceResourceId:
-                                signals = [{'bicep': build_prometheus_signal_bicep(q)} for q in prometheus]
-                                entity.add_prometheus_signals(
-                                    node.azureMonitorWorkspaceResourceId,
-                                    auth_setting_key,
-                                    signals
-                                )
+                            signals = [{'bicep': build_azure_resource_signal_bicep(q)} for q in resource_metrics]
+                            entity.add_azure_resource_signals(
+                                azure_resource_id,
+                                auth_setting_key,
+                                signals
+                            )
+                        
+                        # Add Log Analytics signal group with inline signals
+                        if log_analytics and node.logAnalyticsResourceId:
+                            signals = [{'bicep': build_log_analytics_signal_bicep(q)} for q in log_analytics]
+                            entity.add_log_analytics_signals(
+                                node.logAnalyticsResourceId,
+                                auth_setting_key,
+                                signals
+                            )
+                        
+                        # Add Prometheus signal group with inline signals
+                        if prometheus and node.azureMonitorWorkspaceResourceId:
+                            signals = [{'bicep': build_prometheus_signal_bicep(q)} for q in prometheus]
+                            entity.add_prometheus_signals(
+                                node.azureMonitorWorkspaceResourceId,
+                                auth_setting_key,
+                                signals
+                            )
                 
                 # Add entity to collection
                 symbolic_name = f"entity{len(entities)}"
@@ -795,7 +808,7 @@ class HealthModelConverter:
                 f"prometheus={migrated_signals_prometheus}).")
 
             if (skipped_disabled_signals + skipped_text_signals
-                    + skipped_unsupported_type_signals + skipped_nested_healthmodel_queries > 0
+                    + skipped_unsupported_type_signals + dropped_nested_healthmodel_queries > 0
                     or location_changed_from is not None):
                 self.logger.warning(f"Not migrated 1:1 for '{v1_model.name}':")
                 if skipped_disabled_signals > 0:
@@ -804,8 +817,8 @@ class HealthModelConverter:
                     self.logger.warning(f"  - {skipped_text_signals} signal(s) skipped: dataType 'Text' is not supported in public preview (numeric thresholds only).")
                 if skipped_unsupported_type_signals > 0:
                     self.logger.warning(f"  - {skipped_unsupported_type_signals} signal(s) skipped: unsupported query type(s) [{', '.join(sorted(skipped_unsupported_types))}].")
-                if skipped_nested_healthmodel_queries > 0:
-                    self.logger.warning(f"  - {skipped_nested_healthmodel_queries} nested health model metric quer(y/ies) re-modeled via entity relationship instead of a signal.")
+                if dropped_nested_healthmodel_queries > 0:
+                    self.logger.warning(f"  - {dropped_nested_healthmodel_queries} nested health model metric quer(y/ies) dropped: the entity now references the nested 'Microsoft.CloudHealth/healthmodels' resource directly, so its health state is propagated without explicit metric signals.")
                 if location_changed_from is not None:
                     self.logger.warning(f"  - location changed from '{location_changed_from}' to '{location}' (source region not available in public preview).")
 

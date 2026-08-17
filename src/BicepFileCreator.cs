@@ -109,7 +109,7 @@ public class BicepFileCreator
 
             // Migration summary counters
             int migratedSignalsAzureResource = 0, migratedSignalsLogAnalytics = 0, migratedSignalsPrometheus = 0;
-            int skippedDisabledSignals = 0, skippedTextSignals = 0, skippedNestedHealthModelQueries = 0, skippedUnsupportedTypeSignals = 0;
+            int skippedDisabledSignals = 0, skippedTextSignals = 0, droppedNestedHealthModelQueries = 0, skippedUnsupportedTypeSignals = 0;
             var skippedUnsupportedTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             if (v1HealthModel.identity != null)
@@ -180,12 +180,29 @@ public class BicepFileCreator
                 var dependsOn = new List<string>();
 
                 KeyValuePair<string, AuthenticationSetting>? authenticationSetting = null;
-                var queries = node.queries?.Where(q => q.enabledState == "Enabled").ToList();
+                var queries = node.queries?.Where(q => q.enabledState == "Enabled").ToList() ?? [];
                 skippedDisabledSignals += node.queries?.Count(q => q.enabledState != "Enabled") ?? 0;
-                if (queries?.Count > 0)
+
+                // A node pointing at another health model must keep the reference (rewritten to the
+                // new resource provider) even if it has no queries left after filtering: in the public
+                // preview a nested health model no longer needs explicit health score metrics.
+                var azureResourceId = node.azureResourceId ?? string.Empty;
+                var isNestedHealthModel = azureResourceId.Contains(
+                    "microsoft.healthmodel/healthmodels", StringComparison.InvariantCultureIgnoreCase);
+                if (isNestedHealthModel)
+                {
+                    azureResourceId = azureResourceId.Replace(
+                        "microsoft.healthmodel/healthmodels", "Microsoft.CloudHealth/healthmodels", StringComparison.InvariantCultureIgnoreCase);
+                    logger.LogInformation(
+                        "Replacing 'microsoft.healthmodel/healthmodels' with 'Microsoft.CloudHealth/healthmodels' in AzureResourceId for nested health model {nodeName}. Ensure that the nested health model is also being converted and resides in the same resource group as before!",
+                        nodeName);
+                }
+
+                if (queries.Count > 0 || isNestedHealthModel)
                 {
                     authenticationSetting = authenticationSettings.FirstOrDefault(a =>
-                        a.Value.Properties.ManagedIdentityName.EndsWith(node.credentialId, StringComparison.InvariantCultureIgnoreCase));
+                        !string.IsNullOrEmpty(node.credentialId)
+                        && a.Value.Properties.ManagedIdentityName.EndsWith(node.credentialId, StringComparison.InvariantCultureIgnoreCase));
 
                     if (authenticationSetting?.Value == null)
                     {
@@ -205,7 +222,7 @@ public class BicepFileCreator
                     var signalGroups = new SignalGroups();
 
                     // Count queries that will not be migrated as signals, by reason.
-                    skippedNestedHealthModelQueries += queries.Count(q => q.queryType == "ResourceMetricsQuery"
+                    droppedNestedHealthModelQueries += queries.Count(q => q.queryType == "ResourceMetricsQuery"
                         && q.metricNamespace.Equals("microsoft.healthmodel/healthmodels", StringComparison.InvariantCultureIgnoreCase));
                     skippedTextSignals += queries.Count(q => q.dataType == "Text"
                         && (q.queryType == "LogQuery"
@@ -223,20 +240,8 @@ public class BicepFileCreator
                             StringComparison.InvariantCultureIgnoreCase))
                         .Where(q => q.dataType != "Text")
                         .ToList();
-                    if (resourceMetricsQueries.Count != 0)
+                    if (resourceMetricsQueries.Count != 0 || isNestedHealthModel)
                     {
-                        var azureResourceId = node.azureResourceId;
-
-                        // Special handling for nested health models
-                        if (azureResourceId.Contains("microsoft.healthmodel/healthmodels", StringComparison.InvariantCultureIgnoreCase))
-                        {
-                            azureResourceId = azureResourceId.Replace(
-                                "microsoft.healthmodel/healthmodels", "Microsoft.CloudHealth/healthmodels", StringComparison.InvariantCultureIgnoreCase);
-                            logger.LogInformation(
-                                "Replacing 'microsoft.healthmodel/healthmodels' with 'Microsoft.CloudHealth/healthmodels' in AzureResourceId for nested health model {nodeName}. Ensure that the nested health model is also being converted and resides in the same resource group as before!",
-                                nodeName);
-                        }
-
                         signalGroups.AzureResource = new AzureResourceSignalGroup
                         {
                             AuthenticationSettingSymbolicName = authenticationSetting.Value.Key,
@@ -360,7 +365,7 @@ public class BicepFileCreator
                 v1HealthModel.name, entities.Count, relationships.Count, totalSignals,
                 migratedSignalsAzureResource, migratedSignalsLogAnalytics, migratedSignalsPrometheus);
 
-            if (skippedDisabledSignals + skippedTextSignals + skippedUnsupportedTypeSignals + skippedNestedHealthModelQueries > 0
+            if (skippedDisabledSignals + skippedTextSignals + skippedUnsupportedTypeSignals + droppedNestedHealthModelQueries > 0
                 || locationChangedFrom != null)
             {
                 logger.LogWarning("Not migrated 1:1 for '{model}':", v1HealthModel.name);
@@ -370,8 +375,8 @@ public class BicepFileCreator
                     logger.LogWarning("  - {count} signal(s) skipped: dataType 'Text' is not supported in public preview (numeric thresholds only).", skippedTextSignals);
                 if (skippedUnsupportedTypeSignals > 0)
                     logger.LogWarning("  - {count} signal(s) skipped: unsupported query type(s) [{types}].", skippedUnsupportedTypeSignals, string.Join(", ", skippedUnsupportedTypes));
-                if (skippedNestedHealthModelQueries > 0)
-                    logger.LogWarning("  - {count} nested health model metric quer(y/ies) re-modeled via entity relationship instead of a signal.", skippedNestedHealthModelQueries);
+                if (droppedNestedHealthModelQueries > 0)
+                    logger.LogWarning("  - {count} nested health model metric quer(y/ies) dropped: the entity now references the nested 'Microsoft.CloudHealth/healthmodels' resource directly, so its health state is propagated without explicit metric signals.", droppedNestedHealthModelQueries);
                 if (locationChangedFrom != null)
                     logger.LogWarning("  - location changed from '{from}' to '{to}' (source region not available in public preview).", locationChangedFrom, location);
             }
